@@ -6,7 +6,6 @@ cmake_uninstall.cmake
 .DS_Store
 *.so
 *.pyd
-*.dll
 *.sln
 *.sdf
 *.opensdf
