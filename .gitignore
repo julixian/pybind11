@@ -47,7 +47,6 @@ pybind11Targets.cmake
 tests/main.cpp
 CMakeUserPresents.json
 
-/Python
 /tmp*
 .ruby-version
 .*cache*/
