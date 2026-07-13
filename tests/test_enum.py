@@ -5,13 +5,9 @@ import re
 
 import pytest
 
-import env
 from pybind11_tests import enums as m
 
 
-@pytest.mark.xfail(
-    env.GRAALPY and env.GRAALPY_VERSION < (24, 2), reason="Fixed in GraalPy 24.2"
-)
 def test_unscoped_enum():
     assert str(m.UnscopedEnum.EOne) == "UnscopedEnum.EOne"
     assert str(m.UnscopedEnum.ETwo) == "UnscopedEnum.ETwo"
@@ -197,9 +193,6 @@ def test_implicit_conversion():
     assert repr(x) == "{<EMode.EFirstMode: 1>: 3, <EMode.ESecondMode: 2>: 4}"
 
 
-@pytest.mark.xfail(
-    env.GRAALPY and env.GRAALPY_VERSION < (24, 2), reason="Fixed in GraalPy 24.2"
-)
 def test_binary_operators():
     assert int(m.Flags.Read) == 4
     assert int(m.Flags.Write) == 2
@@ -275,6 +268,15 @@ def test_docstring_signatures():
 def test_str_signature():
     for enum_type in [m.ScopedEnum, m.UnscopedEnum]:
         assert enum_type.__str__.__doc__.startswith("__str__")
+
+
+def test_enum_custom_str_keeps_name_property():
+    assert str(m.CustomStrEnum.A) == "CustomStrEnum value 1"
+    assert str(m.CustomStrEnum.B) == "CustomStrEnum value 2"
+    assert m.CustomStrEnum.A.name == "A"
+    assert m.CustomStrEnum.A.value == 1
+    assert m.CustomStrEnum.B.name == "B"
+    assert m.CustomStrEnum.B.value == 2
 
 
 def test_generated_dunder_methods_pos_only():

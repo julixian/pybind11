@@ -457,19 +457,24 @@ PyModuleDef_Init should be treated like any other PyObject (so not shared across
     static int PYBIND11_CONCAT(pybind11_exec_, name)(PyObject *);                                 \
     PYBIND11_PLUGIN_IMPL(name) {                                                                  \
         PYBIND11_CHECK_PYTHON_VERSION                                                             \
-        pybind11::detail::ensure_internals();                                                     \
-        static ::pybind11::detail::slots_array mod_def_slots = ::pybind11::detail::init_slots(    \
-            &PYBIND11_CONCAT(pybind11_exec_, name), ##__VA_ARGS__);                               \
-        static PyModuleDef def{/* m_base */ PyModuleDef_HEAD_INIT,                                \
-                               /* m_name */ PYBIND11_TOSTRING(name),                              \
-                               /* m_doc */ nullptr,                                               \
-                               /* m_size */ 0,                                                    \
-                               /* m_methods */ nullptr,                                           \
-                               /* m_slots */ mod_def_slots.data(),                                \
-                               /* m_traverse */ nullptr,                                          \
-                               /* m_clear */ nullptr,                                             \
-                               /* m_free */ nullptr};                                             \
-        return PyModuleDef_Init(&def);                                                            \
+        try {                                                                                     \
+            pybind11::detail::ensure_internals();                                                 \
+            static ::pybind11::detail::slots_array mod_def_slots                                  \
+                = ::pybind11::detail::init_slots(&PYBIND11_CONCAT(pybind11_exec_, name),          \
+                                                 ##__VA_ARGS__);                                  \
+            static PyModuleDef def{/* m_base */ PyModuleDef_HEAD_INIT,                            \
+                                   /* m_name */ PYBIND11_TOSTRING(name),                          \
+                                   /* m_doc */ nullptr,                                           \
+                                   /* m_size */ 0,                                                \
+                                   /* m_methods */ nullptr,                                       \
+                                   /* m_slots */ mod_def_slots.data(),                            \
+                                   /* m_traverse */ nullptr,                                      \
+                                   /* m_clear */ nullptr,                                         \
+                                   /* m_free */ nullptr};                                         \
+            return PyModuleDef_Init(&def);                                                        \
+        }                                                                                         \
+        PYBIND11_CATCH_INIT_EXCEPTIONS                                                            \
+        return nullptr;                                                                           \
     }
 
 #define PYBIND11_MODULE_EXEC(name, variable)                                                      \
@@ -1034,6 +1039,17 @@ struct is_instantiation<Class, Class<Us...>> : std::true_type {};
 template <typename T>
 using is_shared_ptr = is_instantiation<std::shared_ptr, T>;
 
+/// Detects whether static_cast<Derived*>(Base*) is valid, i.e. the inheritance is non-virtual.
+/// Used to detect virtual bases: if this is false, pointer adjustments require the implicit_casts
+/// chain rather than reinterpret_cast.
+template <typename Base, typename Derived, typename = void>
+struct is_static_downcastable : std::false_type {};
+template <typename Base, typename Derived>
+struct is_static_downcastable<Base,
+                              Derived,
+                              void_t<decltype(static_cast<Derived *>(std::declval<Base *>()))>>
+    : std::true_type {};
+
 /// Check if T looks like an input iterator
 template <typename T, typename = void>
 struct is_input_iterator : std::false_type {};
@@ -1056,14 +1072,30 @@ struct strip_function_object {
     using type = typename remove_class<decltype(&F::operator())>::type;
 };
 
+// Strip noexcept from a free function type (C++17: noexcept is part of the type).
+template <typename T>
+struct remove_noexcept {
+    using type = T;
+};
+#ifdef __cpp_noexcept_function_type
+template <typename R, typename... A>
+struct remove_noexcept<R(A...) noexcept> {
+    using type = R(A...);
+};
+#endif
+template <typename T>
+using remove_noexcept_t = typename remove_noexcept<T>::type;
+
 // Extracts the function signature from a function, function pointer or lambda.
+// Strips noexcept from the result so that factory/pickle_factory partial specializations
+// (which match plain Return(Args...)) work correctly with noexcept callables (issue #2234).
 template <typename Function, typename F = remove_reference_t<Function>>
-using function_signature_t = conditional_t<
+using function_signature_t = remove_noexcept_t<conditional_t<
     std::is_function<F>::value,
     F,
     typename conditional_t<std::is_pointer<F>::value || std::is_member_pointer<F>::value,
                            std::remove_pointer<F>,
-                           strip_function_object<F>>::type>;
+                           strip_function_object<F>>::type>>;
 
 /// Returns true if the type looks like a lambda: that is, isn't a function, pointer or member
 /// pointer.  Note that this can catch all sorts of other things, too; this is intended to be used
@@ -1212,6 +1244,36 @@ struct overload_cast_impl {
         -> decltype(pmf) {
         return pmf;
     }
+
+    // Define const/non-const member-pointer selector pairs for qualifier combinations.
+    // The `qualifiers` parameter is used in type position, where extra parentheses are invalid.
+    // NOLINTBEGIN(bugprone-macro-parentheses)
+#define PYBIND11_OVERLOAD_CAST_MEMBER_PTR(qualifiers)                                             \
+    template <typename Return, typename Class>                                                    \
+    constexpr auto operator()(Return (Class::*pmf)(Args...) qualifiers, std::false_type = {})     \
+        const noexcept -> decltype(pmf) {                                                         \
+        return pmf;                                                                               \
+    }                                                                                             \
+    template <typename Return, typename Class>                                                    \
+    constexpr auto operator()(Return (Class::*pmf)(Args...) const qualifiers, std::true_type)     \
+        const noexcept -> decltype(pmf) {                                                         \
+        return pmf;                                                                               \
+    }
+    PYBIND11_OVERLOAD_CAST_MEMBER_PTR(&)
+    PYBIND11_OVERLOAD_CAST_MEMBER_PTR(&&)
+
+#ifdef __cpp_noexcept_function_type
+    template <typename Return>
+    constexpr auto operator()(Return (*pf)(Args...) noexcept) const noexcept -> decltype(pf) {
+        return pf;
+    }
+
+    PYBIND11_OVERLOAD_CAST_MEMBER_PTR(noexcept)
+    PYBIND11_OVERLOAD_CAST_MEMBER_PTR(& noexcept)
+    PYBIND11_OVERLOAD_CAST_MEMBER_PTR(&& noexcept)
+#endif
+#undef PYBIND11_OVERLOAD_CAST_MEMBER_PTR
+    // NOLINTEND(bugprone-macro-parentheses)
 };
 PYBIND11_NAMESPACE_END(detail)
 
@@ -1348,9 +1410,9 @@ constexpr
 //                                                                    std::move(args)
 #endif
 
-// Pybind offers detailed error messages by default for all builts that are debug (through the
-// negation of NDEBUG). This can also be manually enabled by users, for any builds, through
-// defining PYBIND11_DETAILED_ERROR_MESSAGES. This information is primarily useful for those
+// Pybind offers detailed error messages by default in debug builds (through the negation of
+// NDEBUG). This can also be manually enabled by users for any build by defining
+// PYBIND11_DETAILED_ERROR_MESSAGES. This information is primarily useful for those
 // who are writing (as opposed to merely using) libraries that use pybind11.
 #if !defined(PYBIND11_DETAILED_ERROR_MESSAGES) && !defined(NDEBUG)
 #    define PYBIND11_DETAILED_ERROR_MESSAGES
